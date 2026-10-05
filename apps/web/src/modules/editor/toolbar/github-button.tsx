@@ -112,10 +112,10 @@ export function GitHubButton({
   }, [onPull]);
 
   return (
-    <div className="relative">
+    <div className="relative flex-shrink-0">
       {/* Main button */}
       <button
-        className="flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-accent"
+        className="flex h-7 items-center justify-center gap-1.5 rounded-lg border border-border bg-card px-2 sm:px-2.5 text-sm font-medium text-foreground transition-all hover:bg-accent flex-shrink-0"
         onClick={() => {
           if (!isConnected) {
             onConnect();
@@ -125,10 +125,11 @@ export function GitHubButton({
           }
         }}
         disabled={isBusy}
+        title={isConnected ? `GitHub: ${indicator.label}` : "Connect GitHub"}
       >
         {/* GitHub icon */}
         <svg
-          className="h-4 w-4"
+          className="h-3.5 w-3.5 flex-shrink-0"
           viewBox="0 0 16 16"
           fill="currentColor"
           aria-hidden="true"
@@ -137,12 +138,12 @@ export function GitHubButton({
         </svg>
 
         {/* Status dot */}
-        <span className={`h-2 w-2 rounded-full ${indicator.color}`} />
+        <span className={`h-2 w-2 rounded-full flex-shrink-0 ${indicator.color}`} />
 
-        <span>{isConnected ? indicator.label : "Connect GitHub"}</span>
+        <span className="hidden xl:inline text-xs font-medium">{isConnected ? indicator.label : "Connect GitHub"}</span>
 
         {isBusy && (
-          <span className="ml-1 text-xs text-muted-foreground">
+          <span className="hidden xl:inline ml-1 text-xs text-muted-foreground">
             {pushing ? "Pushing..." : "Pulling..."}
           </span>
         )}

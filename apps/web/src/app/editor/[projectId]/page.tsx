@@ -1965,8 +1965,20 @@ function EditorPageInner() {
       const stored = localStorage.getItem(`doable_chat_${resolvedProjectId}`);
       if (stored) {
         const parsed = JSON.parse(stored) as ChatMsg[];
-        // Strip any leftover streaming state from a previous session
-        return parsed.map((m) => ({ ...m, isStreaming: false }));
+        // Filter out empty placeholder assistant messages that were interrupted
+        // mid-generation with no content, no thinking, and no tool actions.
+        return parsed
+          .filter((m) => {
+            if (m.role === "assistant" && !m.content?.trim() && !m.thinkingContent?.trim() && (!m.toolActions || m.toolActions.length === 0)) {
+              return false;
+            }
+            return true;
+          })
+          .map((m) => ({
+            ...m,
+            content: m.content?.trim() ? m.content : (m.role === "assistant" && m.thinkingContent?.trim() ? m.thinkingContent : m.content),
+            isStreaming: false,
+          }));
       }
     } catch {
       // Ignore corrupt localStorage data
@@ -3020,10 +3032,14 @@ function EditorPageInner() {
                     })
                 : undefined;
 
+              const resolvedContent = displayContent?.trim()
+                ? displayContent
+                : (m.role === "assistant" && thinkingContent?.trim() ? thinkingContent : displayContent);
+
               return {
                 id: m.id,
                 role: m.role as "user" | "assistant",
-                content: displayContent,
+                content: resolvedContent,
                 timestamp: new Date(m.created_at).toLocaleTimeString([], {
                   hour: "numeric",
                   minute: "2-digit",
@@ -3719,7 +3735,11 @@ function EditorPageInner() {
     }
     if (!prompt) prompt = fromUrl;
     if (!prompt) return;
-    if (messages.length > 0) return;
+    // Only skip if there are actual assistant messages that successfully produced content or actions
+    const hasCompletedAssistantTurn = messages.some(
+      (m) => m.role === "assistant" && (!!m.content?.trim() || !!m.thinkingContent?.trim() || (m.toolActions && m.toolActions.length > 0))
+    );
+    if (hasCompletedAssistantTurn) return;
     // Small delay so the UI renders the chat panel first
     setTimeout(() => {
       sendMessage(prompt!, storedAttachments, urlMode === "plan" ? "plan" : undefined);
@@ -5123,9 +5143,9 @@ function EditorPageInner() {
     />
     <div className="flex h-screen flex-col bg-card text-foreground">
       {/* ─── Top Bar ──────────────────────────────────────────── */}
-      <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-border bg-card px-2 md:px-3">
+      <header className="flex h-12 w-full flex-shrink-0 items-center justify-between border-b border-border bg-card px-2 sm:px-3 gap-2 overflow-hidden select-none">
         {/* Left: Logo + Back arrow + Project name with dropdown */}
-        <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-shrink">
           {/* Doable logo icon */}
           <button
             onClick={() => router.push("/dashboard")}
@@ -5137,9 +5157,9 @@ function EditorPageInner() {
           </button>
 
           {/* Editable project name with dropdown chevron + status subtitle */}
-          <div className="hidden sm:flex flex-col min-w-0">
+          <div className="flex flex-col min-w-0 max-w-[120px] xs:max-w-[160px] sm:max-w-[200px] md:max-w-[240px] lg:max-w-[280px] xl:max-w-[360px]">
             {isEditingName ? (
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 min-w-0">
                 <input
                   autoFocus
                   value={nameInput}
@@ -5160,7 +5180,7 @@ function EditorPageInner() {
                     setIsEditingName(false);
                     apiUpdateProject(resolvedProjectId, { name: nameInput }).catch(() => {});
                   }}
-                  className="bg-background border border-input rounded px-2 py-0.5 text-sm text-foreground outline-none focus:border-brand-500 w-48"
+                  className="bg-background border border-input rounded px-2 py-0.5 text-sm text-foreground outline-none focus:border-brand-500 w-32 sm:w-44 max-w-full"
                 />
                 <button
                   onClick={() => {
@@ -5168,7 +5188,7 @@ function EditorPageInner() {
                     setIsEditingName(false);
                     apiUpdateProject(resolvedProjectId, { name: nameInput }).catch(() => {});
                   }}
-                  className="p-1 text-muted-foreground hover:text-foreground"
+                  className="p-1 text-muted-foreground hover:text-foreground flex-shrink-0"
                 >
                   <Check className="h-3.5 w-3.5" />
                 </button>
@@ -5176,9 +5196,10 @@ function EditorPageInner() {
             ) : (
               <button
                 onClick={() => setIsEditingName(true)}
-                className="group flex items-center gap-1 text-sm font-semibold text-foreground hover:text-foreground truncate"
+                className="group flex items-center gap-1 text-sm font-semibold text-foreground hover:text-foreground min-w-0 text-left"
+                title={projectName}
               >
-                {projectName}
+                <span className="truncate">{projectName}</span>
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
               </button>
             )}
@@ -5189,7 +5210,7 @@ function EditorPageInner() {
                   <span className="truncate">{liveStatus}{streamIdleSeconds != null ? ` · ${streamIdleSeconds}s` : ""}</span>
                   <span className="font-mono tabular-nums text-[#9b9a77]/70 text-[10px] flex-shrink-0">{chatElapsedSec}s</span>
                   {chatElapsedSec >= 60 && (
-                    <span className="italic text-[#9b9a77]/60 text-[10px] flex-shrink-0">Taking longer than usual</span>
+                    <span className="italic text-[#9b9a77]/60 text-[10px] flex-shrink-0 hidden xl:inline">Taking longer than usual</span>
                   )}
                 </>
               ) : (
@@ -5204,299 +5225,303 @@ function EditorPageInner() {
 
           {/* Scaffold status indicator */}
           {scaffoldStatus !== "ready" && scaffoldStatus !== "idle" && scaffoldStatus !== "error" && (
-            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground flex-shrink-0">
-              <Loader2 className="h-3 w-3 animate-spin text-brand-700 dark:text-brand-400" />
-              {scaffoldStatus === "scaffolding" ? "Getting ready..." : "Starting..."}
+            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground flex-shrink-0" title={scaffoldStatus === "scaffolding" ? "Getting ready..." : "Starting..."}>
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-700 dark:text-brand-400" />
+              <span className="hidden lg:inline">{scaffoldStatus === "scaffolding" ? "Getting ready..." : "Starting..."}</span>
             </div>
           )}
         </div>
 
-        {/* Center: View toggle icon buttons */}
-        <div className="flex items-center gap-0.5 rounded-xl bg-muted border border-border p-0.5">
-          <div className="flex items-center gap-0.5 overflow-x-auto scrollbar-none">
-          {/* Core toolbar buttons */}
-          {([
-            { key: "history" as ActiveTab, icon: Clock, label: "History", isToggle: false },
-            { key: "chat" as ActiveTab, icon: PanelLeftClose, label: "Toggle sidebar", isToggle: true },
-            { key: "preview" as ActiveTab, icon: Globe, label: "Preview", isToggle: false },
-            { key: "code" as ActiveTab, icon: Code2, label: "Code", isToggle: false },
-          ]).map(({ key, icon: Icon, label, isToggle }, idx) => {
-            const isActive = !isToggle && activeTab === key;
-            return (
+        {/* Center: View toggle buttons + Preview toolbar */}
+        <div className="flex items-center gap-1 sm:gap-1.5 lg:gap-2 flex-shrink-0">
+          {/* View toggle icon buttons */}
+          <div className="flex items-center gap-0.5 rounded-xl bg-muted border border-border p-0.5 flex-shrink-0">
+            <div className="flex items-center gap-0.5 overflow-x-auto scrollbar-none">
+              {/* Core toolbar buttons */}
+              {([
+                { key: "history" as ActiveTab, icon: Clock, label: "History", isToggle: false },
+                { key: "chat" as ActiveTab, icon: PanelLeftClose, label: "Toggle sidebar", isToggle: true },
+                { key: "preview" as ActiveTab, icon: Globe, label: "Preview", isToggle: false },
+                { key: "code" as ActiveTab, icon: Code2, label: "Code", isToggle: false },
+              ]).map(({ key, icon: Icon, label, isToggle }, idx) => {
+                const isActive = !isToggle && activeTab === key;
+                return (
+                  <button
+                    key={`${key}-${idx}`}
+                    onClick={() => {
+                      if (isToggle) {
+                        setShowSidebar((v) => !v);
+                      } else {
+                        setActiveTab(key);
+                      }
+                    }}
+                    className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md flex-shrink-0 ${
+                      isActive
+                        ? "gap-1.5 bg-brand-500/15 text-brand-700 dark:text-brand-400 px-2.5 py-1"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent p-1.5"
+                    }`}
+                    title={label}
+                  >
+                    <Icon className="h-4 w-4 flex-shrink-0" />
+                    {isActive && <span className="text-xs whitespace-nowrap">{label}</span>}
+                  </button>
+                );
+              })}
+
+              {/* Pinned items from More menu */}
+              {pinnedItems.map((tabKey) => {
+                const item = MORE_MENU_ITEMS.find((m) => m.key === tabKey);
+                if (!item) return null;
+                const IconComp = item.icon;
+                const isActive = activeTab === tabKey;
+                return (
+                  <button
+                    key={`pinned-${tabKey}`}
+                    onClick={() => setActiveTab(tabKey)}
+                    className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md flex-shrink-0 ${
+                      isActive
+                        ? "gap-1.5 bg-brand-500/15 text-brand-700 dark:text-brand-400 px-2.5 py-1"
+                        : "text-muted-foreground hover:text-foreground hover:bg-accent p-1.5"
+                    }`}
+                    title={item.label}
+                  >
+                    <IconComp className="h-4 w-4 flex-shrink-0" />
+                    {isActive && <span className="text-xs whitespace-nowrap">{item.label}</span>}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* More menu (triple-dots) */}
+            <div className="relative flex-shrink-0" ref={moreMenuRef}>
               <button
-                key={`${key}-${idx}`}
-                onClick={() => {
-                  if (isToggle) {
-                    setShowSidebar((v) => !v);
-                  } else {
-                    setActiveTab(key);
-                  }
-                }}
-                className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md ${
-                  isActive
-                    ? "gap-1.5 bg-brand-500/15 text-brand-700 dark:text-brand-400 px-2.5 py-1"
-                    : "text-muted-foreground hover:text-foreground hover:bg-accent p-1.5"
+                onClick={() => setShowMoreMenu((v) => !v)}
+                className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md p-1.5 ${
+                  showMoreMenu
+                    ? "bg-brand-500/15 text-brand-700 dark:text-brand-400"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent"
                 }`}
-                title={label}
+                title="More views"
               >
-                <Icon className="h-4 w-4" />
-                {isActive && <span className="text-xs">{label}</span>}
+                <MoreHorizontal className="h-4 w-4" />
               </button>
-            );
-          })}
 
-          {/* Pinned items from More menu */}
-          {pinnedItems.map((tabKey) => {
-            const item = MORE_MENU_ITEMS.find((m) => m.key === tabKey);
-            if (!item) return null;
-            const IconComp = item.icon;
-            const isActive = activeTab === tabKey;
-            return (
-              <button
-                key={`pinned-${tabKey}`}
-                onClick={() => setActiveTab(tabKey)}
-                className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md ${
-                  isActive
-                    ? "gap-1.5 bg-brand-500/15 text-brand-700 dark:text-brand-400 px-2.5 py-1"
-                    : "text-muted-foreground hover:text-foreground hover:bg-accent p-1.5"
-                }`}
-                title={item.label}
-              >
-                <IconComp className="h-4 w-4" />
-                {isActive && <span className="text-xs">{item.label}</span>}
-              </button>
-            );
-          })}
-          </div>
-
-          {/* More menu (triple-dots) */}
-          <div className="relative" ref={moreMenuRef}>
-            <button
-              onClick={() => setShowMoreMenu((v) => !v)}
-              className={`flex items-center justify-center text-[13px] font-medium transition-all rounded-md p-1.5 ${
-                showMoreMenu
-                  ? "bg-brand-500/15 text-brand-700 dark:text-brand-400"
-                  : "text-muted-foreground hover:text-foreground hover:bg-accent"
-              }`}
-              title="More views"
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </button>
-
-            {/* Dropdown */}
-            {showMoreMenu && (
-              <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-52 rounded-lg border border-border bg-muted shadow-xl shadow-md py-1 z-50">
-                {/* View tabs with pin/unpin */}
-                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Views</div>
-                {MORE_MENU_ITEMS.map(({ key, icon: MenuIcon, label }) => {
-                  const isActive = activeTab === key;
-                  const isPinned = pinnedItems.includes(key);
-                  return (
-                    <div
-                      key={key}
-                      className={`flex items-center justify-between px-3 py-2 text-sm cursor-pointer transition-colors ${
-                        isActive
-                          ? "bg-brand-500/10 text-brand-700 dark:text-brand-400"
-                          : "text-foreground hover:bg-accent"
-                      }`}
-                    >
-                      <button
-                        className="flex items-center gap-2.5 flex-1 min-w-0"
-                        onClick={() => {
-                          setActiveTab(key);
-                          setShowMoreMenu(false);
-                        }}
-                      >
-                        <MenuIcon className="h-4 w-4 flex-shrink-0" />
-                        <span className="truncate">{label}</span>
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          togglePin(key);
-                        }}
-                        className={`flex-shrink-0 p-1 rounded transition-colors ${
-                          isPinned
-                            ? "text-[#4D91FF] hover:text-blue-300"
-                            : "text-muted-foreground hover:text-foreground"
+              {/* Dropdown */}
+              {showMoreMenu && (
+                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-52 rounded-lg border border-border bg-muted shadow-xl shadow-md py-1 z-50">
+                  {/* View tabs with pin/unpin */}
+                  <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Views</div>
+                  {MORE_MENU_ITEMS.map(({ key, icon: MenuIcon, label }) => {
+                    const isActive = activeTab === key;
+                    const isPinned = pinnedItems.includes(key);
+                    return (
+                      <div
+                        key={key}
+                        className={`flex items-center justify-between px-3 py-2 text-sm cursor-pointer transition-colors ${
+                          isActive
+                            ? "bg-brand-500/10 text-brand-700 dark:text-brand-400"
+                            : "text-foreground hover:bg-accent"
                         }`}
-                        title={isPinned ? "Unpin from toolbar" : "Pin to toolbar"}
                       >
-                        {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-                      </button>
-                    </div>
-                  );
-                })}
-                {/* Separator */}
-                <div className="my-1 border-t border-border" />
-                {/* Project actions */}
-                <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Project</div>
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                  onClick={() => { router.push(`/projects/${resolvedProjectId}/settings`); setShowMoreMenu(false); }}
-                >
-                  <Settings className="h-4 w-4 flex-shrink-0" />
-                  <span>Settings</span>
-                </button>
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                  onClick={() => { handleDownloadZip(); setShowMoreMenu(false); }}
-                >
-                  <Download className="h-4 w-4 flex-shrink-0" />
-                  <span>Download project</span>
-                </button>
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                  onClick={() => { handleDuplicateProject(); setShowMoreMenu(false); }}
-                >
-                  <CopyPlus className="h-4 w-4 flex-shrink-0" />
-                  <span>{isDuplicating ? "Duplicating..." : "Duplicate project"}</span>
-                </button>
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                  onClick={() => { handleCopyProjectLink(); setShowMoreMenu(false); }}
-                >
-                  <Link className="h-4 w-4 flex-shrink-0" />
-                  <span>Copy project link</span>
-                </button>
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
-                  onClick={() => { setShortcutsDialogOpen(true); setShowMoreMenu(false); }}
-                >
-                  <Keyboard className="h-4 w-4 flex-shrink-0" />
-                  <span>Keyboard shortcuts</span>
-                </button>
-                {/* Separator */}
-                <div className="my-1 border-t border-border" />
-                <button
-                  className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-950/50 hover:text-red-300 transition-colors"
-                  onClick={() => { setDeleteConfirmOpen(true); setShowMoreMenu(false); }}
-                >
-                  <Trash2 className="h-4 w-4 flex-shrink-0" />
-                  <span>Delete project</span>
-                </button>
-              </div>
-            )}
+                        <button
+                          className="flex items-center gap-2.5 flex-1 min-w-0"
+                          onClick={() => {
+                            setActiveTab(key);
+                            setShowMoreMenu(false);
+                          }}
+                        >
+                          <MenuIcon className="h-4 w-4 flex-shrink-0" />
+                          <span className="truncate">{label}</span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            togglePin(key);
+                          }}
+                          className={`flex-shrink-0 p-1 rounded transition-colors ${
+                            isPinned
+                              ? "text-[#4D91FF] hover:text-blue-300"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                          title={isPinned ? "Unpin from toolbar" : "Pin to toolbar"}
+                        >
+                          {isPinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {/* Separator */}
+                  <div className="my-1 border-t border-border" />
+                  {/* Project actions */}
+                  <div className="px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Project</div>
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
+                    onClick={() => { router.push(`/projects/${resolvedProjectId}/settings`); setShowMoreMenu(false); }}
+                  >
+                    <Settings className="h-4 w-4 flex-shrink-0" />
+                    <span>Settings</span>
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
+                    onClick={() => { handleDownloadZip(); setShowMoreMenu(false); }}
+                  >
+                    <Download className="h-4 w-4 flex-shrink-0" />
+                    <span>Download project</span>
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
+                    onClick={() => { handleDuplicateProject(); setShowMoreMenu(false); }}
+                  >
+                    <CopyPlus className="h-4 w-4 flex-shrink-0" />
+                    <span>{isDuplicating ? "Duplicating..." : "Duplicate project"}</span>
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
+                    onClick={() => { handleCopyProjectLink(); setShowMoreMenu(false); }}
+                  >
+                    <Link className="h-4 w-4 flex-shrink-0" />
+                    <span>Copy project link</span>
+                  </button>
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-foreground hover:bg-accent transition-colors"
+                    onClick={() => { setShortcutsDialogOpen(true); setShowMoreMenu(false); }}
+                  >
+                    <Keyboard className="h-4 w-4 flex-shrink-0" />
+                    <span>Keyboard shortcuts</span>
+                  </button>
+                  {/* Separator */}
+                  <div className="my-1 border-t border-border" />
+                  <button
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-sm text-red-400 hover:bg-red-950/50 hover:text-red-300 transition-colors"
+                    onClick={() => { setDeleteConfirmOpen(true); setShowMoreMenu(false); }}
+                  >
+                    <Trash2 className="h-4 w-4 flex-shrink-0" />
+                    <span>Delete project</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* Preview controls inline in top bar */}
-        <div className="flex items-center gap-1">
-          {isEditingRoute ? (
-            <form
-              className="flex items-center gap-1 rounded-full bg-muted border border-[#4D91FF] px-2.5 py-1"
-              onSubmit={(e) => {
-                e.preventDefault();
-                const route = routeInputValue.startsWith("/") ? routeInputValue : `/${routeInputValue}`;
-                setPreviewRoute(route);
-                setIsEditingRoute(false);
-                if (iframeRef.current && previewUrl) {
-                  try {
-                    const base = new URL(previewUrl);
-                    base.pathname = route;
-                    iframeRef.current.src = base.toString();
-                  } catch {
-                    // fallback: append route to preview URL origin
-                    iframeRef.current.src = previewUrl.replace(/\/$/, "") + route;
-                  }
-                }
-              }}
-            >
-              <Globe className="h-3 w-3 text-[#4D91FF]" />
-              <input
-                ref={routeInputRef}
-                type="text"
-                value={routeInputValue}
-                onChange={(e) => setRouteInputValue(e.target.value)}
-                onBlur={() => setIsEditingRoute(false)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setRouteInputValue(previewRoute);
-                    setIsEditingRoute(false);
+          {/* Preview controls inline in top bar */}
+          <div className="hidden sm:flex items-center gap-1 flex-shrink-0">
+            {isEditingRoute ? (
+              <form
+                className="flex items-center gap-1 rounded-full bg-muted border border-[#4D91FF] px-2.5 py-1"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const route = routeInputValue.startsWith("/") ? routeInputValue : `/${routeInputValue}`;
+                  setPreviewRoute(route);
+                  setIsEditingRoute(false);
+                  if (iframeRef.current && previewUrl) {
+                    try {
+                      const base = new URL(previewUrl);
+                      base.pathname = route;
+                      iframeRef.current.src = base.toString();
+                    } catch {
+                      // fallback: append route to preview URL origin
+                      iframeRef.current.src = previewUrl.replace(/\/$/, "") + route;
+                    }
                   }
                 }}
-                className="bg-transparent text-[11px] text-foreground font-mono outline-none w-24 placeholder:text-muted-foreground"
-                placeholder="/path"
-                autoFocus
-              />
-            </form>
-          ) : (
+              >
+                <Globe className="h-3 w-3 text-[#4D91FF] flex-shrink-0" />
+                <input
+                  ref={routeInputRef}
+                  type="text"
+                  value={routeInputValue}
+                  onChange={(e) => setRouteInputValue(e.target.value)}
+                  onBlur={() => setIsEditingRoute(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setRouteInputValue(previewRoute);
+                      setIsEditingRoute(false);
+                    }
+                  }}
+                  className="bg-transparent text-[11px] text-foreground font-mono outline-none w-20 sm:w-24 placeholder:text-muted-foreground"
+                  placeholder="/path"
+                  autoFocus
+                />
+              </form>
+            ) : (
+              <button
+                onClick={() => {
+                  setRouteInputValue(previewRoute);
+                  setIsEditingRoute(true);
+                  setTimeout(() => routeInputRef.current?.select(), 0);
+                }}
+                className="hidden md:flex items-center gap-1 rounded-full bg-muted border border-border px-2 sm:px-2.5 py-1 hover:border-border transition-colors cursor-text flex-shrink-0"
+                title="Click to navigate to a route"
+              >
+                <Globe className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+                <span className="text-[11px] text-muted-foreground font-mono truncate max-w-[80px]">{previewRoute}</span>
+              </button>
+            )}
+            <div className="hidden lg:flex items-center rounded-full bg-muted border border-border p-0.5 flex-shrink-0">
+              {([
+                { mode: "desktop" as DeviceMode, Icon: Monitor, label: "Desktop" },
+                { mode: "tablet" as DeviceMode, Icon: Tablet, label: "Tablet (768px)" },
+                { mode: "mobile" as DeviceMode, Icon: Smartphone, label: "Mobile (375px)" },
+              ]).map(({ mode, Icon, label }) => (
+                <button
+                  key={mode}
+                  onClick={() => setDeviceMode(mode)}
+                  className={`flex h-6 w-6 items-center justify-center rounded-full transition-colors flex-shrink-0 ${
+                    deviceMode === mode
+                      ? "bg-secondary text-foreground"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  title={label}
+                >
+                  <Icon className="h-3 w-3" />
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
-                setRouteInputValue(previewRoute);
-                setIsEditingRoute(true);
-                setTimeout(() => routeInputRef.current?.select(), 0);
+                if (iframeRef.current && previewUrl) {
+                  iframeRef.current.src = previewUrl;
+                }
               }}
-              className="flex items-center gap-1 rounded-full bg-muted border border-border px-2.5 py-1 hover:border-border transition-colors cursor-text"
-              title="Click to navigate to a route"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors flex-shrink-0"
+              title="Refresh preview"
+              disabled={!previewUrl}
             >
-              <Globe className="h-3 w-3 text-muted-foreground" />
-              <span className="text-[11px] text-muted-foreground font-mono">{previewRoute}</span>
+              <RefreshCw className="h-3.5 w-3.5" />
             </button>
-          )}
-          <div className="flex items-center rounded-full bg-muted border border-border p-0.5">
-            {([
-              { mode: "desktop" as DeviceMode, Icon: Monitor, label: "Desktop" },
-              { mode: "tablet" as DeviceMode, Icon: Tablet, label: "Tablet (768px)" },
-              { mode: "mobile" as DeviceMode, Icon: Smartphone, label: "Mobile (375px)" },
-            ]).map(({ mode, Icon, label }) => (
-              <button
-                key={mode}
-                onClick={() => setDeviceMode(mode)}
-                className={`flex h-6 w-6 items-center justify-center rounded-full transition-colors ${
-                  deviceMode === mode
-                    ? "bg-secondary text-foreground"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-                title={label}
-              >
-                <Icon className="h-3 w-3" />
-              </button>
-            ))}
+            <button
+              onClick={() => {
+                if (previewUrl) window.open(previewUrl, "_blank");
+              }}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors flex-shrink-0"
+              title="Open in new tab"
+              disabled={!previewUrl}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={handleToggleFullscreen}
+              className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors flex-shrink-0"
+              title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            >
+              {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+            </button>
           </div>
-          <button
-            onClick={() => {
-              if (iframeRef.current && previewUrl) {
-                iframeRef.current.src = previewUrl;
-              }
-            }}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            title="Refresh preview"
-            disabled={!previewUrl}
-          >
-            <RefreshCw className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={() => {
-              if (previewUrl) window.open(previewUrl, "_blank");
-            }}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            title="Open in new tab"
-            disabled={!previewUrl}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={handleToggleFullscreen}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
-            title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
-          >
-            {isFullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-          </button>
         </div>
 
         {/* Right: Share + GitHub + Upgrade + Publish */}
-        <div className="flex items-center gap-1 md:gap-1.5">
+        <div className="flex items-center justify-end gap-1 sm:gap-1.5 flex-shrink-0">
           {/* Collaboration presence avatars */}
           <CollabHeaderItems />
 
           {/* Share: pill with muted bg, h-7 */}
           <button
             onClick={() => setShareDialogOpen(true)}
-            className="flex h-7 items-center gap-1.5 rounded-full bg-muted px-2.5 text-sm text-[#FCFBF8] hover:bg-[#333] transition-colors"
+            className="flex h-7 items-center justify-center gap-1.5 rounded-lg bg-muted px-2 lg:px-2.5 text-sm text-[#FCFBF8] hover:bg-[#333] transition-colors flex-shrink-0"
+            title="Share project"
           >
-            <UserPlus className="h-4 w-4" />
-            <span className="hidden lg:inline">Share</span>
+            <UserPlus className="h-3.5 w-3.5 flex-shrink-0" />
+            <span className="hidden xl:inline text-xs font-medium">Share</span>
           </button>
           {/* GitHub sync button with status */}
           <GitHubButton
@@ -5513,9 +5538,11 @@ function EditorPageInner() {
           {/* Upgrade */}
           <button
             onClick={() => router.push("/billing")}
-            className="flex h-7 items-center gap-1.5 rounded-lg bg-accent border border-border px-2.5 text-sm text-foreground hover:bg-accent hover:text-foreground transition-all"
+            className="flex h-7 items-center justify-center gap-1.5 rounded-lg bg-accent border border-border px-2 sm:px-2.5 text-sm text-foreground hover:bg-accent hover:text-foreground transition-all flex-shrink-0"
+            title="Upgrade plan"
           >
-            <Crown className="h-4 w-4 text-amber-600 dark:text-amber-400" /><span className="hidden md:inline">Upgrade</span>
+            <Crown className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 flex-shrink-0" />
+            <span className="hidden xl:inline text-xs font-medium">Upgrade</span>
           </button>
           {/* Deploy */}
           <button
@@ -5524,11 +5551,11 @@ function EditorPageInner() {
               setPublishError(null);
               setPublishModalOpen(true);
             }}
-            className="flex h-7 items-center gap-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 px-3 text-sm font-medium text-white shadow-lg shadow-brand-900/30 hover:brightness-110 transition-all"
+            className="flex h-7 items-center justify-center gap-1.5 rounded-lg bg-gradient-to-r from-brand-600 to-brand-500 px-2.5 sm:px-3 text-sm font-medium text-white shadow-sm shadow-brand-900/30 hover:brightness-110 transition-all flex-shrink-0"
             title="Deploy to a public URL"
           >
-            <CloudUpload className="h-4 w-4 md:hidden" />
-            <span className="hidden md:inline">Deploy</span>
+            <CloudUpload className="h-3.5 w-3.5 flex-shrink-0" />
+            <span className="hidden sm:inline text-xs font-medium">Deploy</span>
           </button>
         </div>
       </header>
@@ -5770,7 +5797,7 @@ function EditorPageInner() {
                         {/* Task card block removed — the purple streaming orb below displays file modifications. */}
 
                         {/* Inline thinking indicator — auto-open during streaming for live visibility */}
-                        {msg.thinkingContent && (
+                        {msg.thinkingContent && msg.content !== msg.thinkingContent && (
                           <details open={msg.isStreaming} className="mb-2 rounded-lg border border-border bg-card text-[13px]">
                             <summary className="cursor-pointer select-none px-3 py-1.5 text-muted-foreground hover:text-muted-foreground flex items-center gap-2">
                               {msg.isStreaming && (
@@ -5851,10 +5878,48 @@ function EditorPageInner() {
                                   </pre>
                                 </details>
                               </div>
-                            ) : msg.content && (
+                            ) : msg.content ? (
                               extractFunctionSteps(msg.content).length > 0 && stripFunctionMarkup(msg.content).length === 0
                                 ? renderFunctionStepList(msg.content)
                                 : <MemoizedMessageContent content={stripFunctionMarkup(msg.content)} />
+                            ) : msg.thinkingContent ? (
+                              <MemoizedMessageContent content={msg.thinkingContent} />
+                            ) : null}
+
+                            {/* Interrupted generation fallback banner */}
+                            {!msg.content && !msg.thinkingContent && (!msg.toolActions || msg.toolActions.length === 0) && !msg.isStreaming && !msg.isError && (
+                              <div className="flex flex-col gap-2 rounded-xl border border-border/70 bg-muted/20 p-3.5 text-[13px] text-muted-foreground my-1">
+                                <div className="flex items-center gap-2 text-foreground/90 font-medium text-[13px]">
+                                  <AlertCircle className="h-4 w-4 text-amber-500 shrink-0" />
+                                  <span>Response interrupted</span>
+                                </div>
+                                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                                  The assistant was interrupted before completing this response.
+                                </p>
+                                <div className="pt-1">
+                                  <button
+                                    onClick={() => {
+                                      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+                                      if (lastUserMsg?.content) {
+                                        const userAtts = lastUserMsg.attachments?.map((a, i) => ({
+                                          id: `att_${i}`,
+                                          name: a.name,
+                                          type: (a.fileType || a.type || "file") as Attachment["type"],
+                                          mimeType: a.mimeType || a.type || "application/octet-stream",
+                                          size: 0,
+                                          data: a.data || "",
+                                          preview: a.preview,
+                                        }));
+                                        sendMessage(lastUserMsg.content, userAtts);
+                                      }
+                                    }}
+                                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors shadow-sm"
+                                  >
+                                    <RotateCcw className="h-3.5 w-3.5" />
+                                    Retry prompt
+                                  </button>
+                                </div>
+                              </div>
                             )}
                             
                             {/* Live Streaming Glowing Orb - visible while streaming, and

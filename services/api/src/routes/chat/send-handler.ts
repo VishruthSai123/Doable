@@ -652,21 +652,23 @@ export function registerSendHandler(app: Hono<AuthEnv>) {
             }
           }
 
-          let sessionId = await resolveSession(projectId, userId, sessionKey, mode, modeChanged, resolvedModel, resolvedProvider, resolvedGithubToken, projectPath, systemPrompt, sessionTools, toolProgress, state.traceCollector, stream, skillDirectories);
-          // persistSessionToDb now THROWS on real DB failures (see R11 fix —
-          // it used to swallow errors and return undefined, which caused the
-          // entire user/assistant message pair to be silently dropped). A
-          // returned value here is always a non-empty uuid.
-          const dbSessionId = await persistSessionToDb(projectId, userId, mode, sessionId);
+          // Persist the session row and user/assistant messages to DB immediately so that
+          // a reload during the first few seconds (or during engine start) never encounters
+          // a session-less project or missing history rows.
+          const dbSessionId = await persistSessionToDb(projectId, userId, mode, undefined);
           state.usageCollector?.setSessionId(dbSessionId);
 
           const { displayName, color } = await resolveUserDisplay(userId);
           await saveUserMessage(dbSessionId, displayContent ?? content, userId, displayName, color, attachments);
           broadcastToRoom(projectId, { type: "ai:message-sent", userId, displayName, content: content.slice(0, 200), messageId }, userId).catch(() => {});
 
-          // ai_active_streams + activeRequests already registered above,
-          // before streamSSE opened, to close the refresh-race window.
           state.assistantMessageId = await preInsertAssistantMessage(dbSessionId);
+
+          let sessionId = await resolveSession(projectId, userId, sessionKey, mode, modeChanged, resolvedModel, resolvedProvider, resolvedGithubToken, projectPath, systemPrompt, sessionTools, toolProgress, state.traceCollector, stream, skillDirectories);
+          // Link the newly resolved copilot_session_id to the DB session row
+          if (sessionId) {
+            await persistSessionToDb(projectId, userId, mode, sessionId);
+          }
 
           const unsubToolEvents = onToolEvent(projectId, (toolName, status, args) => {
             if (status === "start") {
@@ -745,8 +747,9 @@ export function registerSendHandler(app: Hono<AuthEnv>) {
             // the buffer is the actual response (e.g. simple chat greeting).
             if (state.leadingTextBuffer) {
               const bufLen = state.leadingTextBuffer.length;
-              if (!state.hadToolCalls && state.assistantContent.length === 0) {
-                // No tool calls, no content — this IS the response, not reasoning
+              if (state.assistantContent.length === 0) {
+                // No content emitted yet — whether tools ran or not, this buffered text
+                // is the model's actual response/summary!
                 const buffered = state.leadingTextBuffer;
                 state.leadingTextBuffer = "";
                 state.leadingTextFlushed = true;
@@ -755,9 +758,9 @@ export function registerSendHandler(app: Hono<AuthEnv>) {
                 const visibleContent = buffered.replace(/<think>[\s\S]*?<\/think>\s*/gi, "").trim();
                 if (visibleContent) {
                   // Move buffer from thinking to content (only the visible portion)
-                  state.assistantThinking = state.assistantThinking.slice(0, state.assistantThinking.length - buffered.length);
+                  state.assistantThinking = state.assistantThinking.slice(0, Math.max(0, state.assistantThinking.length - buffered.length));
                   state.assistantContent += visibleContent;
-                  console.log(`[Chat][${projectId.slice(0, 8)}] Flushing ${visibleContent.length} chars as content (stripped from ${bufLen} buffer, no tools)`);
+                  console.log(`[Chat][${projectId.slice(0, 8)}] Flushing ${visibleContent.length} chars as content (from ${bufLen} buffer, hadTools=${state.hadToolCalls})`);
                   broadcastToRoom(projectId, { type: "ai:stream-chunk", chunk: visibleContent, messageId, isThinking: false }, userId).catch(() => {});
                   await stream.writeSSE({ data: JSON.stringify({ type: "thinking_to_text", data: visibleContent }) });
                 } else {

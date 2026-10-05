@@ -152,6 +152,15 @@ export async function handleFinalCleanup(
   keepAlive: ReturnType<typeof setInterval>,
   softHeartbeat: ReturnType<typeof setInterval>,
 ): Promise<void> {
+  // Safety net: If assistantContent is empty, but assistantThinking contains response text,
+  // promote it to assistantContent so we never persist an empty ghost message to ai_messages.
+  if (!state.assistantContent && state.assistantThinking) {
+    const stripped = state.assistantThinking.replace(/<think>[\s\S]*?<\/think>\s*/gi, "").trim();
+    if (stripped) {
+      state.assistantContent = stripped;
+    }
+  }
+
   // Final save assistant message
   state.traceCollector?.onSseEmit("post_processing", { phase: "db_save_start" });
   await finalSaveAssistantMessage(
